@@ -279,6 +279,7 @@ local deletionShader = love.graphics.newShader [[
 
 
 function PixelParticles.newCanvas(xSize, ySize, maxSpeed)
+	local displayCanvas = {love.graphics.newCanvas(xSize, ySize), love.graphics.newCanvas(xSize, ySize)}
 	local images = {love.graphics.newCanvas(xSize, ySize), love.graphics.newCanvas(xSize, ySize)}
 	local speedMaps = {love.graphics.newCanvas(xSize, ySize), love.graphics.newCanvas(xSize, ySize)}
 	local moveMaps = {love.graphics.newCanvas(xSize, ySize), love.graphics.newCanvas(xSize, ySize)}
@@ -290,7 +291,7 @@ function PixelParticles.newCanvas(xSize, ySize, maxSpeed)
 	--forceMap to record what moves need to be made
 	--speedMap to record speeds of each pixel
 	--moveMap to record speeds of each pixel
-	local pParticleCanvas = {images = images, speedMaps = speedMaps, moveMaps = moveMaps, forceMap = forceMap, deletionMap = deletionMap, particles = {}, xSize = xSize, ySize = ySize, timer = 0, speed = maxSpeed, fTRatio = 0.4, forces = {}, openSides = {{false, false}, {false, false}}}
+	local pParticleCanvas = {displayCanvas = displayCanvas, images = images, speedMaps = speedMaps, moveMaps = moveMaps, forceMap = forceMap, deletionMap = deletionMap, particles = {}, xSize = xSize, ySize = ySize, timer = 0, speed = maxSpeed, fTRatio = 0.4, forces = {}, pixelSources = {}, speedLines = 0, openSides = {{false, false}, {false, false}}}
 	
 	return pParticleCanvas
 end
@@ -333,6 +334,9 @@ local canvasShiftShader = love.graphics.newShader [[
 		
 		vec2 shiftCoords = texture_coords + vec2(xShift/love_ScreenSize.x, yShift/love_ScreenSize.y);
 		
+		shiftCoords[0] = mod(shiftCoords[0], 1);
+		shiftCoords[1] = mod(shiftCoords[1], 1);
+		
 		if (shiftCoords[0] > 0 && shiftCoords[0] < 1 && shiftCoords[1] > 0 && shiftCoords[1] < 1) {
 			love_Canvases[0] = Texel(oldPositionMap, shiftCoords);
 			love_Canvases[1] = Texel(oldSpeedMap, shiftCoords);
@@ -373,6 +377,7 @@ end
 
 function PixelParticles.addForce(pixelCanvas, force)
 	binaryInsert(pixelCanvas.forces, force, "order")
+	return force
 end
 
 function PixelParticles.addImage(particleCanvas, x, y, canvas)
@@ -384,6 +389,13 @@ function PixelParticles.addImage(particleCanvas, x, y, canvas)
 		love.graphics.setColor(1, 1, 1, 1)
 		love.graphics.draw(canvas, x - math.ceil(width/2), y - math.ceil(height/2))
 	end)
+end
+
+function PixelParticles.addPixelSource(particleCanvas, x1, y1, x2, y2, lowCol, highCol, frequency)
+	local canvas = love.graphics.newCanvas(x2 - x1, y2 - y1)
+	local source = {x1 = x1, y1 = y1, x2 = x2, y2 = y2, canvas = canvas, lowCol = lowCol, highCol = highCol, frequency = frequency, timer = 0}
+	table.insert(particleCanvas.pixelSources, source)
+	return source
 end
 
 local spaceSpeedResetShader = love.graphics.newShader [[
@@ -404,6 +416,33 @@ local spaceSpeedResetShader = love.graphics.newShader [[
 function PixelParticles.update(canvas, dt)
 	canvas.timer = canvas.timer + dt
 	love.graphics.setColor(1, 1, 1, 1)
+	
+	--Process pixel sources
+	for i = 1, #canvas.pixelSources do
+		local pixelSource = canvas.pixelSources[i]
+		pixelSource.timer = pixelSource.timer + dt*pixelSource.frequency
+		if pixelSource.timer > 0 then
+			local nPixels = math.floor(pixelSource.timer)
+			pixelSource.timer = pixelSource.timer - nPixels
+			
+			love.graphics.setCanvas(pixelSource.canvas)
+			love.graphics.clear()
+			
+			for i = 1, nPixels do
+				local pX = math.floor(math.random()*(pixelSource.x2 - pixelSource.x1 + 1))
+				local pY = math.floor(math.random()*(pixelSource.y2 - pixelSource.y1 + 1))
+				
+				local colRatio = math.random()
+				local col = {colRatio*pixelSource.lowCol[1] + (1 - colRatio)*pixelSource.highCol[1], colRatio*pixelSource.lowCol[2] + (1 - colRatio)*pixelSource.highCol[2], colRatio*pixelSource.lowCol[3] + (1 - colRatio)*pixelSource.highCol[3]}
+				love.graphics.setColor(col)
+				love.graphics.points(pX, pY)
+			end
+			
+			love.graphics.setCanvas()
+			PixelParticles.addImage(canvas, math.ceil((pixelSource.x1 + pixelSource.x2)/2), math.ceil((pixelSource.y1 + pixelSource.y2)/2), pixelSource.canvas)
+		end
+	end
+	--
 	
 	--Run forces
 	initSpeedShader:send("imageMap", canvas.images[1])
@@ -443,27 +482,7 @@ function PixelParticles.update(canvas, dt)
 				force.shader:send("maxSpeed", canvas.speed)
 			end
 			
-			if force.properties.angles then
-				for j = 1, #force.properties.angles do
-					force.shader:send("angle" .. j, force.properties.angles[j])
-				end
-			end
-			
-			if force.properties.numbers then
-				for j = 1, #force.properties.numbers do
-					force.shader:send("n" .. j, force.properties.numbers[j])
-				end
-			end
-			
-			if force.properties.images then
-				for j = 1, #force.properties.images do
-					force.shader:send("image" .. j, force.properties.images[j])
-				end
-			end
-			
-			if force.properties.acceleration then
-				force.shader:send("accel", force.properties.acceleration*tempDt)
-			end
+			PixelParticles.processGenericShaderProperties(force.shader, force.properties, tempDt)
 			
 			love.graphics.setShader(force.shader)
 			love.graphics.setCanvas(toSpeedMap)
@@ -502,11 +521,26 @@ function PixelParticles.update(canvas, dt)
 	end
 	--
 	
+	local setColor = love.graphics.setColor
+	local changed = false
 	while canvas.timer >= 1/canvas.speed do
+		if not changed then
+			changed = true
+			if canvas.speedLines > 0 then
+				local swapTemp = canvas.displayCanvas[1]
+				canvas.displayCanvas[1] = canvas.displayCanvas[2]
+				canvas.displayCanvas[2] = swapTemp
+				
+				love.graphics.setCanvas(canvas.displayCanvas[1])
+				love.graphics.clear()
+				setColor(1, 1, 1, canvas.speedLines)
+				love.graphics.draw(canvas.displayCanvas[2], 0, 0)
+			else
+				love.graphics.setCanvas(canvas.displayCanvas[1])
+				love.graphics.clear()
+			end
+		end
 		canvas.timer = canvas.timer - 1/canvas.speed
-		
-		local setColor = love.graphics.setColor
-		local points = love.graphics.points
 		
 		setColor(1, 1, 1, 1)
 		
@@ -570,10 +604,44 @@ function PixelParticles.update(canvas, dt)
 		love.graphics.draw(canvas.images[2], 0, 0)
 		love.graphics.setCanvas()
 		--
+		
+		if canvas.speedLines ~= 0 then
+			love.graphics.setCanvas(canvas.displayCanvas[1])
+			love.graphics.draw(canvas.images[1], 0, 0)
+		end
+	end
+	
+	if canvas.speedLines == 0 and changed then
+		love.graphics.setCanvas(canvas.displayCanvas[1])
+		love.graphics.draw(canvas.images[1], 0, 0)
 	end
 	
 	love.graphics.setShader()
 	love.graphics.setCanvas()
+end
+
+function PixelParticles.processGenericShaderProperties(shader, properties, dt)
+	if properties.angles then
+		for j = 1, #properties.angles do
+			shader:send("angle" .. j, properties.angles[j])
+		end
+	end
+	
+	if properties.numbers then
+		for j = 1, #properties.numbers do
+			shader:send("n" .. j, properties.numbers[j])
+		end
+	end
+	
+	if properties.images then
+		for j = 1, #properties.images do
+			shader:send("image" .. j, properties.images[j])
+		end
+	end
+	
+	if properties.acceleration then
+		shader:send("accel", properties.acceleration*dt)
+	end
 end
 
 function PixelParticles.drawCanvas(partCanvas, x, y, scale, debugDraw)
@@ -583,7 +651,7 @@ function PixelParticles.drawCanvas(partCanvas, x, y, scale, debugDraw)
 	end
 	
 	love.graphics.setColor(1, 1, 1, 1)
-	love.graphics.draw(partCanvas.images[1], x, y, 0, scale, scale)
+	love.graphics.draw(partCanvas.displayCanvas[1], x, y, 0, scale, scale)
 	
 	love.graphics.setColor(1, 1, 1, 0.6)
 	if debugDraw == "speed" then

@@ -333,4 +333,123 @@ function PixelForces.windyWaysFromPoint(pixelCanvas, strength, x, y, noiseResolu
 	return newForce(windyWaysShader, -1, properties, 1)
 end
 
+local collectionImageShader = love.graphics.newShader [[
+	extern Image baseImage;
+	
+	vec2 checkAdjPixel(vec2 offset, Image canvas, vec2 texture_coords) {
+		vec2 pixOffset = vec2(offset[0]/love_ScreenSize.x, offset[1]/love_ScreenSize.y);
+		vec4 oPixel = Texel(canvas, texture_coords + pixOffset);
+		
+		if (oPixel[3] > 0) {
+			return offset + vec2(floor(2*(oPixel[0] - 0.5) + 0.5), floor(2*(oPixel[1] - 0.5) + 0.5));
+		}
+		return vec2(0, 0);
+	}
+	
+	vec4 effect(vec4 colour, Image canvas, vec2 texture_coords, vec2 pixel_coords)
+    {
+		vec4 cPixel = Texel(canvas, texture_coords);
+		
+		if (cPixel[3] == 0) {
+			vec4 iPixel = Texel(baseImage, texture_coords);
+			
+			if (iPixel[3] > 0) {
+				return vec4(0.5, 0.5, 1, 1);
+			} else {
+				vec2 chosenOffset = vec2(0, 0);
+				
+				for (int i = 0; i <= 1; i++) {
+					number xOff = 2*i - 1;
+					vec2 xPixel = checkAdjPixel(vec2(xOff, 0), canvas, texture_coords);
+					if (xPixel[0] != 0 || xPixel[1] != 0) {
+						chosenOffset = xPixel;
+						break;
+					}
+					
+					number yOff = 2*i - 1;
+					vec2 yPixel = checkAdjPixel(vec2(0, yOff), canvas, texture_coords);
+					if (yPixel[0] != 0 || yPixel[1] != 0) {
+						chosenOffset = yPixel;
+						break;
+					}
+				}
+				
+				if (chosenOffset[0] != 0 || chosenOffset[1] != 0) {
+					return vec4(0.5 + chosenOffset[0], 0.5 + chosenOffset[1], 0, 1);
+				}
+			}
+		}
+		
+		return cPixel;
+	}
+]]
+function generateImageCollectionMap(canvas)
+	local collectionMaps = {love.graphics.newCanvas(canvas:getWidth(), canvas:getHeight()), love.graphics.newCanvas(canvas:getWidth(), canvas:getHeight())}
+	
+	collectionImageShader:send("baseImage", canvas)
+	
+	love.graphics.setShader(collectionImageShader)
+	
+	local currentMap = 1
+	local iterations = math.max(canvas:getWidth(), canvas:getHeight())
+	
+	for i = 1, iterations do
+		otherMap = currentMap
+		currentMap = (currentMap%2) + 1
+	
+		love.graphics.setCanvas(collectionMaps[currentMap])
+		love.graphics.clear()
+		love.graphics.draw(collectionMaps[otherMap], 0, 0)
+	end
+	
+	love.graphics.setCanvas()
+	love.graphics.setShader()
+	
+	return collectionMaps[currentMap]
+end
+local collectToImage = love.graphics.newShader [[
+	extern Image image1; //collection map
+	
+	extern number maxSpeed;
+	extern number accel; //sortSpeed
+	
+	vec4 correctSpeedMagnitude(vec4 speed) {
+		if ((mod(speed[0], 1) != speed[0]) || (mod(speed[1], 1) != speed[1])) {
+			number angle = atan(speed[1] - 0.5, speed[0] - 0.5);
+			speed[0] = 0.5 + 0.5*cos(angle);
+			speed[1] = 0.5 + 0.5*sin(angle);
+		}
+		return speed;
+	}
+	
+	vec4 effect(vec4 colour, Image oldSpeedMap, vec2 texture_coords, vec2 pixel_coords)
+    {
+		vec4 cSpeed = Texel(oldSpeedMap, texture_coords);
+		
+		vec4 mapPixel = Texel(image1, texture_coords);
+		
+		number strength = accel/(2*maxSpeed);
+		vec4 addSpeed = vec4(strength*2*(mapPixel[0] - 0.5), strength*2*(mapPixel[1] - 0.5), 0, 0);
+		
+		if (mapPixel[2] == 1) {
+			strength = min(2*strength, sqrt(pow(cSpeed[0] - 0.5, 2) + pow(cSpeed[0] - 0.5, 2)));
+			number angle = atan(-(cSpeed[1] - 0.5), -(cSpeed[0] - 0.5));
+			
+			addSpeed = vec4(strength*cos(angle), strength*sin(angle), 0, 0);
+		}
+		
+		cSpeed = correctSpeedMagnitude(cSpeed + addSpeed);
+		
+		return cSpeed;
+	}
+]]
+function PixelForces.collectToImage(imageCanvas, accel, duration)
+	local map = generateImageCollectionMap(imageCanvas)
+	
+	TESTIMAGE = map
+	
+	local properties = {acceleration = accel, images = {map}, maxSpeed = true, minSpeed = accel}
+	return newForce(collectToImage, duration, properties, 2)
+end
+
 return PixelForces
